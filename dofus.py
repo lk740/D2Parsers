@@ -1,11 +1,11 @@
 # File: dofus.py
 # description : a Scapy dissector for Dofus protocol
-# Installation on Windows : copy the file into the scapy contrib folder
+# Installation on Linux/Windows : copy the file into the scapy contrib folder
 # Requirement : you need to have the protocol_scapy.json file
 # Author : lk740
 
-from scapy.compat import Optional
-from scapy.packet import Packet, bind_layers, NoPayload
+from scapy.compat import Optional, Tuple
+from scapy.packet import Packet, bind_layers
 
 from scapy.fields import (
     Field,
@@ -15,21 +15,19 @@ from scapy.fields import (
     StrField,
     MultipleTypeField,
     PacketLenField,
-    NBytesField,
+    FieldListField,
     ShortField,
     FieldLenField,
     ByteEnumField,
     IntField,
-    ByteField
+    ByteField,
 )
 
 from scapy.layers.inet import TCP
 from scapy.all import conf
-from zlib import decompress
 
 import struct
 import json
-import os
 
 conf.debug_dissector = True
 
@@ -77,12 +75,61 @@ class XStrField(StrField):
         """Convert string value to integer"""
         return int.from_bytes(string, "big")
 
+class VariableFieldLenField(Field):
+    __slots__ = ["length_of", "count_of", "adjust", "length_from"]
+    
+    def __init__(
+            self,
+            name,
+            default,
+            length_of=None,
+            count_of=None,
+            adjust=lambda pkt, x: x,
+            length_from=None
+    ):
+        Field.__init__(self, name, default, fmt="B")
+        self.length_of = length_of
+        self.count_of = count_of
+        self.adjust = adjust
+        self.length_from = length_from
 
+    def i2m(self, pkt: Packet, x: int) -> int:
+        if x is None and pkt is not None:
+            if self.length_of is not None:
+                fld, fval = pkt.getfield_and_val(self.length_of)
+                f = fld.i2len(pkt, fval)
+            elif self.count_of is not None:
+                fld, fval = pkt.getfield_and_val(self.count_of)
+                f = fld.i2count(pkt, fval)
+            else:
+                raise ValueError(
+                    "Field should have either length_of or count_of"
+                )
+            x = self.adjust(pkt, f)
+        elif x is None:
+            x = 0
+        return x
+    
+    def i2repr(self, pkt: Packet, x:bytes) -> int:
+        if x is not None:
+            return int.from_bytes(x, "big")
+        else:
+            return super().i2repr(pkt, x)
+    
+    
+    def addfield(self, pkt: Packet, s: bytes, val) -> bytes:
+        len_pkt = self.length_from(pkt)
+        t = self.i2m(pkt, val).to_bytes(len_pkt, "big")
+        return s+struct.pack("%is"%len_pkt,t)
+
+    def getfield(self, pkt: Packet, s: bytes):
+        len_pkt = self.length_from(pkt)
+        return s[len_pkt:], self.m2i(pkt,s[:len_pkt])
+    
 
 class readVarLong(Field):
 
     def __init__(self, name, default, sz):
-        # type: (str, Optional[int], int) -> None
         Field.__init__(self, name, default, ">" + str(sz) + "s")
 
     def i2repr(self, pkt, x):
@@ -112,7 +159,6 @@ class readVarLong(Field):
 class readVarInt(Field):
 
     def __init__(self, name, default, sz):
-        # type: (str, Optional[int], int) -> None
         Field.__init__(self, name, default, ">" + str(sz) + "s")
 
     def i2repr(self, pkt, x):
@@ -142,7 +188,7 @@ class readVarInt(Field):
 class readVarShort(Field):
 
     def __init__(self, name, default, sz):
-        # type: (str, Optional[int], int) -> None
+        self.sz = sz
         Field.__init__(self, name, default, ">" + str(sz) + "s")
 
     def i2repr(self, pkt, x):
@@ -171,7 +217,6 @@ class readVarShort(Field):
     
 class readDouble(Field):
     def __init__(self, name, default):
-        # type: (str, Optional[int], int) -> None
         Field.__init__(self, name, default, "!d")
 
 
@@ -198,7 +243,7 @@ class CharacterLevelUpInformationMessage(Packet):
     name = "CharacterLevelUpInformationMessage"
     fields_desc = [
         readVarShort("newLevel", None, 1),
-        ShortField("lenName", None),
+        FieldLenField("lenName", None, length_of="Name"),
         StrLenField("Name", None, length_from=lambda pkt: pkt.lenName),
         readVarLong("CharacterId", None, 6)
     ]
@@ -213,7 +258,7 @@ class BasicAckMessage(Packet):
 class ProtocolRequired(Packet):
     name = "ProtocolRequired"
     fields_desc = [
-        ShortField("lenVers", None),
+        FieldLenField("lenVers", None, length_of="version"),
         StrLenField("version", None, length_from=lambda pkt: pkt.lenVers)
         ]
     
@@ -246,7 +291,7 @@ DOFUS_CHANNEL_TYPES = {
 class ChatClientMultiMessage(Packet):
     name = "ChatClientMultiMessage"
     fields_desc = [
-        ShortField("content_len", 0),
+        FieldLenField("content_len", 0, length_of="content"),
         StrLenField("content", "", length_from=lambda pkt: pkt.content_len),
         ByteEnumField("channel", 0, DOFUS_CHANNEL_TYPES),
     ]
@@ -267,14 +312,27 @@ class ExchangePlayerRequestMessage(Packet):
 class ExchangeKamaModifiedMessage(Packet):
     name = "ExchangeKamaModifiedMessage"
     fields_desc = [
-        readVarLong("quantity", 0, 2)
+        readVarLong("quantity", 0,2)
     ]
 
 class ClientKeyMessage(Packet):
     name = "ClientKeyMessage"
     fields_desc = [
-        ShortField("key_len", 21),
-        StrLenField("key", "osNaOhA7eMlfNBd8ZA#01", length_from=lambda pkt: pkt.key_len)
+        FieldLenField("key_len", None, length_of="key"),
+        StrLenField("key", "client_key", length_from=lambda pkt: pkt.key_len)
+    ]
+
+class SelectedServerDataMessage(Packet):
+    name = "SelectedServerDataMessage"
+    fields_desc = [
+        readVarShort("serverID", 0, 2),
+        FieldLenField("addr_len", None, length_of="address"),
+        StrLenField("address", "dofus2-ga-hellmina.ankama-games.com", length_from=lambda pkt: pkt.addr_len),
+        ShortField("nb_ports", 2),
+        FieldListField("port_list", [], ShortField("port", 5555), count_from=lambda pkt: pkt.nb_ports), # Wrong Field. Should be readVarShort !
+        ByteField("can_create_new_character", 1),
+        ByteField("tickets_nb", 0),
+        FieldListField("ticket", [], ByteField("ticket", 1), count_from=lambda pkt: pkt.tickets_nb)
     ]
 
 #############################################
@@ -286,15 +344,15 @@ class ClientKeyMessage(Packet):
 class DofusRequest(Packet):
     name = "Dofus - Request"
     fields_desc = [
-        BitEnumField("protocolID", None, 14, DOFUS_FUNCTION_CODE),
-        BitField("lengthType", None, 2),
+        BitEnumField("protocolID", 8426, 14, DOFUS_FUNCTION_CODE),
+        BitField("lengthType", 1, 2),
         IntField("sequenceID", 0),
-        XStrLenField("length", 0, length_from = lambda pkt: pkt.lengthType),
+        VariableFieldLenField("length", None, length_of="function", length_from=lambda pkt: pkt.lengthType),
         MultipleTypeField(
             [
                 (
                     PacketLenField(
-                        "apdu",
+                        "function",
                         KamasUpdateMessage(),
                         KamasUpdateMessage,
                         length_from=lambda pkt: int.from_bytes(pkt.length, "big"),
@@ -303,7 +361,7 @@ class DofusRequest(Packet):
                 ),
                 (
                     PacketLenField(
-                        "apdu",
+                        "function",
                         ChatClientMultiMessage(),
                         ChatClientMultiMessage,
                         length_from=lambda pkt: int.from_bytes(pkt.length, "big"),
@@ -312,7 +370,7 @@ class DofusRequest(Packet):
                 ),
                 (
                     PacketLenField(
-                        "apdu",
+                        "function",
                         ChangeMapMessage(),
                         ChangeMapMessage,
                         length_from=lambda pkt: int.from_bytes(pkt.length, "big"),
@@ -321,7 +379,7 @@ class DofusRequest(Packet):
                 ),
                 (
                     PacketLenField(
-                        "apdu",
+                        "function",
                         ExchangePlayerRequestMessage(),
                         ExchangePlayerRequestMessage,
                         length_from=lambda pkt: int.from_bytes(pkt.length, "big"),
@@ -330,7 +388,7 @@ class DofusRequest(Packet):
                 ),
                 (
                     PacketLenField(
-                        "apdu",
+                        "function",
                         ClientKeyMessage(),
                         ClientKeyMessage,
                         length_from=lambda pkt: int.from_bytes(pkt.length, "big"),
@@ -339,50 +397,12 @@ class DofusRequest(Packet):
                 ),
             ],
             StrLenField(
-                "apdu", 
-                None, 
+                "function", 
+                "not implemented", 
                 length_from=lambda pkt: int.from_bytes(pkt.length, "big"),
             ),
         ),
-    ]
-
-
-    def pre_dissect(self, s):
-
-        offset = 0
-        bytes_consumed = 0
-        DOFUS_RESPONSE_MSG_HDR_LEN = 6
-
-        while bytes_consumed < len(s):
-
-            ## Get size of the len field
-            lengthType = int.from_bytes(s[offset:offset+2], "big") & 0b0000011
-
-            ## Check if payload contains data
-            if lengthType != 0:
-
-                ## Get packet length 
-                length = int.from_bytes(s[offset+6:offset+6+lengthType], "big") + DOFUS_RESPONSE_MSG_HDR_LEN + lengthType
-
-                if length == len(s):
-                    bytes_consumed += length
-                    return s
-                ## If there are several dofus data in the packet
-                elif length < len(s):
-                    bytes_consumed += length
-                    bind_layers(DofusRequest, DofusRequest) ## Build a new layer
-                else:
-                    raise NotImplementedError("Unsupported data length")
-
-            else:
-                ## For no apdu functions
-                bytes_consumed += 6
-                bind_layers(DofusRequest, DofusRequest)
-
-            offset = bytes_consumed
-        ## Return the dissected packet when there are several Dofus layer
-        return s[:bytes_consumed]
-    
+    ]    
 
     
 #############################################
@@ -395,14 +415,14 @@ class DofusResponse(Packet):
     name = "Dofus - Response"
 
     fields_desc = [
-        BitEnumField("protocolID", 610, 14, DOFUS_FUNCTION_CODE),
+        BitEnumField("protocolID", 7461, 14, DOFUS_FUNCTION_CODE),
         BitField("lengthType", 1, 2),
-        XStrLenField("length", 0, length_from = lambda pkt: pkt.lengthType),
+        VariableFieldLenField("length", None, length_of="function", length_from=lambda pkt: pkt.lengthType),
         MultipleTypeField(
             [
                 (
                     PacketLenField(
-                        "apdu",
+                        "function",
                         KamasUpdateMessage(),
                         KamasUpdateMessage,
                         length_from=lambda pkt: int.from_bytes(pkt.length, "big"),
@@ -411,7 +431,7 @@ class DofusResponse(Packet):
                 ),
                 (
                     PacketLenField(
-                        "apdu",
+                        "function",
                         BasicAckMessage(),
                         BasicAckMessage,
                         length_from=lambda pkt: int.from_bytes(pkt.length, "big"),
@@ -420,7 +440,7 @@ class DofusResponse(Packet):
                 ),
                 (
                     PacketLenField(
-                        "apdu",
+                        "function",
                         CharacterLevelUpMessage(),
                         CharacterLevelUpMessage,
                         length_from=lambda pkt: int.from_bytes(pkt.length, "big"),
@@ -429,7 +449,7 @@ class DofusResponse(Packet):
                 ),
                 (
                     PacketLenField(
-                        "apdu",
+                        "function",
                         CharacterLevelUpInformationMessage(),
                         CharacterLevelUpInformationMessage,
                         length_from=lambda pkt: int.from_bytes(pkt.length, "big"),
@@ -438,7 +458,7 @@ class DofusResponse(Packet):
                 ),
                 (
                     PacketLenField(
-                        "apdu",
+                        "function",
                         ProtocolRequired(),
                         ProtocolRequired,
                         length_from=lambda pkt: int.from_bytes(pkt.length, "big"),
@@ -447,18 +467,27 @@ class DofusResponse(Packet):
                 ),
                 (
                     PacketLenField(
-                        "apdu",
+                        "function",
                         ExchangeKamaModifiedMessage(),
                         ExchangeKamaModifiedMessage,
                         length_from=lambda pkt: int.from_bytes(pkt.length, "big"),
                     ),
                     lambda pkt: DOFUS_FUNCTION_CODE[pkt.protocolID] == "ExchangeKamaModifiedMessage", 
                 ),
+                (
+                    PacketLenField(
+                        "function",
+                        SelectedServerDataMessage(),
+                        SelectedServerDataMessage,
+                        length_from=lambda pkt: int.from_bytes(pkt.length, "big"),
+                    ),
+                    lambda pkt: DOFUS_FUNCTION_CODE[pkt.protocolID] == "SelectedServerDataMessage", 
+                ),
 
             ],
             StrLenField(
-                "apdu", 
-                None, 
+                "function", 
+                "not implemented", 
                 length_from=lambda pkt: int.from_bytes(pkt.length, "big"),
             ),
         ),
