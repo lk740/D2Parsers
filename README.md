@@ -28,7 +28,7 @@ After that, start Wireshark and enjoy !
 
 To add `dofus.py` to Scapy, you need to copy `protocol_scapy.json` and `dofus.py` into the `contrib` folder of Scapy.
 
-The path depending of you installation.
+The path depends of you installation.
 
 After that, you can use the dissector in Scapy by typing :
 
@@ -36,7 +36,7 @@ After that, you can use the dissector in Scapy by typing :
 >>> load_contrib("dofus")
 ```
 
-Or import directly in your script :
+Or import it directly in your script :
 
 ```python
 from scapy.contrib.dofus import *
