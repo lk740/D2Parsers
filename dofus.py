@@ -230,7 +230,7 @@ class readDouble(Field):
 class KamasUpdateMessage(Packet):
     name = "KamasUpdateMessage"
     fields_desc = [
-        readVarLong("kamasTotal", None, 1)
+        readVarLong("kamasTotal", 1, 2)
     ]
 
 class CharacterLevelUpMessage(Packet):
@@ -291,7 +291,7 @@ DOFUS_CHANNEL_TYPES = {
 class ChatClientMultiMessage(Packet):
     name = "ChatClientMultiMessage"
     fields_desc = [
-        FieldLenField("content_len", 0, length_of="content"),
+        FieldLenField("content_len", None, length_of="content"),
         StrLenField("content", "", length_from=lambda pkt: pkt.content_len),
         ByteEnumField("channel", 0, DOFUS_CHANNEL_TYPES),
     ]
